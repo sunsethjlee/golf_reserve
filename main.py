@@ -1,271 +1,355 @@
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
-from selenium.webdriver.chrome.options import Options
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 기본 설정
-# ──────────────────────────────────────────────────────────────────────────────
-chromedriver_path = "/path/to/chromedriver"  # TODO: 변경
-SITE_URL = "https://example.com/reservation"  # TODO: 변경
-LOGIN_URL = None  # 필요시 "https://example.com/login" 같이 입력
+# ------------------------------
+# 🔧 환경/셀렉터 설정
+# ------------------------------
+LOGIN_URL = "https://welfare.airforce.mil.kr:446/user/login.do?siteId=welfare&id=welfare_060100000000"
+RES_LIST_URL = "https://welfare.airforce.mil.kr:446/cli/wefResList.do?siteId=welfare&id=welfare_030101000000"
 
-# 자정 실행 대기 (KST) 여부
-RUN_AT_MIDNIGHT = False
+USER_ID = "billy0327"
+USER_PW = "golf0327!"
+APPLICANT_NAME = "이혜진"
+PHONE_TO_SEARCH = "010- 9362- 67"  # 실제 검색어로 맞춰줘
 
-# 우선순위: 성남 -> 수원
-LOCATIONS = ["성남", "수원"]
-COURSE_KEYWORDS = ["18홀"]
+# 예약 테이블/폼 셀렉터 (사이트에 맞게 필요 시 조정)
+X_RES_TABLE_THEAD = '//*[@id="reservation"]//table/thead/tr'
+X_RES_HEADER_ALL  = '//*[@id="reservation"]/div[2]/table/thead/tr/th'
 
-# 예약 오픈 범위: 금일 기준 +10 ~ +17
-OPEN_RANGE_DAYS = (10, 17)
+# 슬롯(수원/성남) 행 번호
+ROW_SUWON    = 6
+ROW_SEONGNAM = 8
 
-# 주말만 (토=5, 일=6)
-WEEKEND_DAYS = {5, 6}
+# 예약신청 폼 요소들
+X_DROPDOWN_TIME = '//*[@id="reservation"]/form[2]/div[1]/table/tbody/tr[2]/td/select'
+X_INPUT_NAME    = '//*[@id="nameKr1"]'
+X_ADDRBOOK_LINK = '//*[@id="reservation"]/form[2]/div[3]/fieldset/table/tbody/tr[1]/td[2]/span/a'
 
-# 사이트별 XPATH / 텍스트 셀렉터 (TODO: 사이트 DOM에 맞게 채우세요)
-XPATHS = {
-    # 로그인 (옵션)
-    "login_id":    "//input[@name='user_id']",
-    "login_pw":    "//input[@name='password']",
-    "login_btn":   "//button[contains(.,'로그인') or contains(.,'Login')]",
+# 주소록 팝업 내 (사이트 DOM에 맞게 필요 시 수정)
+X_POPUP_SEARCH_INPUT  = '//*[@id="searchWord"]'               # 예시
+X_POPUP_SEARCH_BUTTON = '//*[@id="btnSearch"]'                # 예시(없으면 Enter로 대체)
+X_POPUP_FIRST_RESULT  = '(//table[@id="resultTbl"]//tr/td/a)[1]'  # 예시: 첫 번째 결과 클릭
 
-    # 캘린더 월 전환
-    "cal_next":    "//*[@aria-label='next' or @id='calNext' or contains(@class,'next')]",  # 예시
-    "cal_prev":    "//*[@aria-label='prev' or @id='calPrev' or contains(@class,'prev')]",
-
-    # 날짜 셀 템플릿 (우선 data-date → 실패 시 텍스트 일자)
-    # 아래 템플릿은 함수에서 format으로 대체
-    "date_cell_data_date": "//*[@data-date='{yyyy}-{mm}-{dd}']",
-    "date_cell_text":      "//*[contains(@class,'calendar')]//*[normalize-space(text())='{day}']",
-
-    # 위치/코스/시간(텍스트 포함 요소 클릭)
-    # 가능한 한 컨테이너 좁혀 주면 오클릭 줄어듦 (필요시 컨테이너 XPATH 추가)
-    "location_text":  "//*[self::*='button' or self::*='a' or self::*='span' or self::*='div'][contains(normalize-space(), '{text}')]",
-    "course_text":    "//*[self::*='button' or self::*='a' or self::*='span' or self::*='div'][contains(normalize-space(), '{text}')]",
-    # 예약 가능 시간 버튼 (다국어/키워드 대응)
-    "time_buttons":   "//button[not(@disabled) and (contains(.,'예약') or contains(.,'가능') or contains(.,'Available') or contains(.,'Book'))]",
-
-    # 다음/확인/동의/제출
-    "next_btn":       "//*[@id='nextBtn' or contains(.,'다음') or contains(.,'Next')]",
-    "agree_checkbox": "//*[self::*='input' and @type='checkbox' or contains(@class,'agree')]",
-    "confirm_btn":    "//*[self::*='button' and (contains(.,'확인') or contains(.,'결제') or contains(.,'예약완료') or contains(.,'Reserve'))]"
-}
-
-# 로그인 정보(사용자가 추후 직접 입력)
-USER_ID = "<YOUR_ID>"      # TODO
-USER_PW = "<YOUR_PASSWORD>"# TODO
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 유틸 함수
-# ──────────────────────────────────────────────────────────────────────────────
-def kst_now():
-    return datetime.now(ZoneInfo("Asia/Seoul"))
-
-def get_target_weekend_dates():
-    today = kst_now().date()
-    start, end = OPEN_RANGE_DAYS
-    dates = [today + timedelta(days=d) for d in range(start, end + 1)]
-    return [d for d in dates if d.weekday() in WEEKEND_DAYS]
-
-def wait_until_kst_midnight():
-    now = kst_now()
-    tomorrow = (now + timedelta(days=1)).date()
-    midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=ZoneInfo("Asia/Seoul"))
-    secs = (midnight - now).total_seconds()
-    if secs > 0:
-        print(f"[INFO] KST 자정까지 대기: {secs:.0f}초")
-        time.sleep(secs + 2)  # 여유 2초
-
-def setup_driver():
-    opts = Options()
-    # opts.add_argument("--headless=new")  # 필요시 헤드리스
-    opts.add_argument("--window-size=1300,1300")
-    # UA 변경 등 필요시 추가
-    service = Service(chromedriver_path)
-    drv = webdriver.Chrome(service=service, options=opts)
-    drv.set_page_load_timeout(60)
-    return drv
-
-def click_text(driver, text, template_xpath_key, timeout=10):
-    xp = XPATHS[template_xpath_key].format(text=text)
-    el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((By.XPATH, xp)))
-    el.click()
-    return el
-
-def try_click(driver, xpath, timeout=10):
-    el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((By.XPATH, xpath)))
-    el.click()
-    return el
-
-def find_elements(driver, xpath, timeout=10):
-    WebDriverWait(driver, timeout).until(EC.presence_of_all_elements_located((By.XPATH, xpath)))
-    return driver.find_elements(By.XPATH, xpath)
-
-def select_date(driver, dt, max_month_jumps=12):
-    yyyy = f"{dt.year:04d}"
-    mm   = f"{dt.month:02d}"
-    dd   = f"{dt.day:02d}"
-    day  = f"{dt.day}"
-
-    # 1) data-date로 바로 클릭
-    for _ in range(2):
+# ------------------------------
+# 공용 유틸
+# ------------------------------
+def wait_dom_ready(driver, timeout_sec=20):
+    """document.readyState == complete 대기"""
+    end = time.time() + timeout_sec
+    while time.time() < end:
         try:
-            xp = XPATHS["date_cell_data_date"].format(yyyy=yyyy, mm=mm, dd=dd)
-            try_click(driver, xp, timeout=2)
-            return True
+            if driver.execute_script("return document.readyState") == "complete":
+                return
         except Exception:
-            # 2) 일자 텍스트로 클릭 (현재 표시 월이어야 함)
-            try:
-                xp_text = XPATHS["date_cell_text"].format(day=day)
-                try_click(driver, xp_text, timeout=2)
-                return True
-            except Exception:
-                # 3) 다음 달로 넘기며 재시도
-                try:
-                    try_click(driver, XPATHS["cal_next"], timeout=2)
-                except Exception:
-                    pass
-    # 월 넘김을 좀 더 시도
-    for _ in range(max_month_jumps):
-        try:
-            xp = XPATHS["date_cell_data_date"].format(yyyy=yyyy, mm=mm, dd=dd)
-            try_click(driver, xp, timeout=2)
-            return True
-        except Exception:
-            try:
-                try_click(driver, XPATHS["cal_next"], timeout=2)
-            except Exception:
-                # prev로도 시도
-                try:
-                    try_click(driver, XPATHS["cal_prev"], timeout=2)
-                except Exception:
-                    time.sleep(0.3)
-    return False
+            pass
+        time.sleep(0.2)
+    # 넘어감 (일부 페이지는 complete 전에 인터랙션 가능)
 
-def select_first_available_time(driver):
+def ensure_reservation_table_context(driver, wait):
+    """현재 문서 또는 iframe에서 예약 thead 보일 때까지 전환"""
+    # 현재 문서 시도
     try:
-        btns = find_elements(driver, XPATHS["time_buttons"], timeout=5)
-        for b in btns:
-            try:
-                if b.is_enabled():
-                    b.click()
-                    return True
-            except StaleElementReferenceException:
-                continue
+        wait.until(EC.presence_of_element_located((By.XPATH, X_RES_TABLE_THEAD)))
+        return
     except TimeoutException:
+        pass
+
+    # iframe 순회
+    frames = driver.find_elements(By.TAG_NAME, 'iframe')
+    for idx in range(len(frames)):
+        driver.switch_to.default_content()
+        driver.switch_to.frame(idx)
+        try:
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, X_RES_TABLE_THEAD)))
+            return
+        except TimeoutException:
+            continue
+
+    driver.switch_to.default_content()
+    raise TimeoutException("예약 테이블 thead를 찾지 못했습니다. (컨텍스트/셀렉터 점검 필요)")
+
+def collect_weekend_cols(driver):
+    """thead의 th를 읽어 '토'/'일' 들어간 열 인덱스를 반환"""
+    headers = driver.find_elements(By.XPATH, X_RES_HEADER_ALL)
+    start_col = 2 if len(headers) >= 2 else 1
+    end_col = len(headers)
+    target_cols = []
+    for i in range(start_col, end_col + 1):
+        th_xpath = f'//*[@id="reservation"]/div[2]/table/thead/tr/th[{i}]'
+        try:
+            txt = driver.find_element(By.XPATH, th_xpath).text.strip()
+            if ('토' in txt) or ('일' in txt):
+                target_cols.append(i)
+        except NoSuchElementException:
+            pass
+    return target_cols
+
+def is_completed_cell(driver, row, col) -> bool:
+    """해당 셀이 '신청완료' 상태인지 미리 검사"""
+    td_xpath = f'//*[@id="reservation"]/div[2]/table/tbody/tr[{row}]/td[{col}]'
+    try:
+        text = driver.find_element(By.XPATH, td_xpath).text.strip()
+        if '신청완료' in text:
+            return True
+        # 클래스 마크업 기반 (있으면)
+        driver.find_element(By.XPATH, td_xpath + '//*[contains(@class,"app-text") and contains(.,"신청완료")]')
+        return True
+    except NoSuchElementException:
         return False
+
+def open_slot(driver, wait, row, col) -> bool:
+    """
+    (row,col) 셀을 클릭해 상세(예약신청 폼) 진입 시도.
+    - '신청완료'면 스킵
+    - 클릭 후 새 창/URL 변경/폼 표식 중 하나라도 보이면 성공
+    - 아무 변화 없으면 실패로 간주
+    """
+    if is_completed_cell(driver, row, col):
+        print(f"[스킵] ({row},{col}) 신청완료")
+        return False
+
+    candidates = [
+        f'//*[@id="reservation"]/div[2]/table/tbody/tr[{row}]/td[{col}]/a/span',
+        f'//*[@id="reservation"]/div[2]/table/tbody/tr[{row}]/td[{col}]//a',
+        f'//*[@id="reservation"]/div[2]/table/tbody/tr[{row}]/td[{col}]//span'
+    ]
+
+    before_url = driver.current_url
+    before_handles = set(driver.window_handles)
+
+    clicked = False
+    for xp in candidates:
+        try:
+            elem = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
+            elem.click()
+            clicked = True
+            break
+        except Exception:
+            continue
+
+    if not clicked:
+        print(f"[실패] ({row},{col}) 클릭 가능한 요소 없음")
+        return False
+
+    def navigated_or_form_loaded(drv):
+        if len(drv.window_handles) > len(before_handles):
+            return True
+        if drv.current_url != before_url:
+            return True
+        try:
+            if drv.find_elements(By.XPATH, "//*[contains(text(),'예약신청') or contains(text(),'운동 희망시간')]"):
+                return True
+            if drv.find_elements(By.XPATH, "//select[option[normalize-space(.)='모든시간']]"):
+                return True
+        except Exception:
+            pass
+        return False
+
+    t0 = time.time()
+    while time.time() - t0 < 6:  # 최대 6초 대기
+        if navigated_or_form_loaded(driver):
+            return True
+        time.sleep(0.2)
+
+    print(f"[실패] ({row},{col}) 클릭했으나 이동/폼 감지 실패 → 다음 셀로")
     return False
 
-def login_if_needed(driver):
-    if LOGIN_URL:
-        driver.get(LOGIN_URL)
+def switch_to_latest_window(driver, timeout=8):
+    """가장 최근 창/탭으로 전환 (이미 떠 있으면 마지막 핸들로)"""
+    end = time.time() + timeout
+    last = driver.window_handles[-1]
+    driver.switch_to.window(last)
+    while time.time() < end:
         try:
-            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, XPATHS["login_id"])))
-            driver.find_element(By.XPATH, XPATHS["login_id"]).send_keys(USER_ID)
-            driver.find_element(By.XPATH, XPATHS["login_pw"]).send_keys(USER_PW)
-            try_click(driver, XPATHS["login_btn"])
-            # 로그인 후 리다이렉트 대기
-            time.sleep(2)
+            # 정상 접근 가능하면 종료
+            driver.title  # 접근 테스트
+            return
         except Exception:
-            pass
+            time.sleep(0.1)
 
-def finalize(driver):
-    try:
-        # 다음 → 동의 → 완료(사이트 구조에 맞게 단계 조정)
+def switch_into_form_iframe_if_any(driver):
+    """예약신청 폼이 iframe 안이면 진입 (못 찾으면 원복)"""
+    def has_form_marker():
         try:
-            try_click(driver, XPATHS["next_btn"], timeout=3)
+            if driver.find_elements(By.XPATH, "//*[contains(text(),'예약신청') or contains(text(),'운동 희망시간')]"):
+                return True
+            if driver.find_elements(By.XPATH, "//select[option[normalize-space(.)='모든시간']]"):
+                return True
         except Exception:
             pass
-        try:
-            try_click(driver, XPATHS["agree_checkbox"], timeout=3)
-        except Exception:
-            pass
-        try:
-            try_click(driver, XPATHS["confirm_btn"], timeout=5)
-        except Exception:
-            pass
-        return True
-    except Exception:
         return False
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 메인 로직
-# ──────────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    if RUN_AT_MIDNIGHT:
-        wait_until_kst_midnight()
+    if has_form_marker():
+        return
 
-    driver = setup_driver()
+    frames = driver.find_elements(By.TAG_NAME, 'iframe')
+    for idx in range(len(frames)):
+        driver.switch_to.default_content()
+        driver.switch_to.frame(idx)
+        if has_form_marker():
+            return
+    driver.switch_to.default_content()
+
+def find_time_select(driver, wait, timeout=10):
+    """'모든시간' 옵션이 있는 select를 다각도로 탐색하여 Select 반환"""
+    candidates = [
+        X_DROPDOWN_TIME,
+        "//select[option[normalize-space(.)='모든시간']]",
+        "//label[contains(.,'운동 희망시간')]/following::select[1]",
+        "//select[@name='hopeTime' or @id='hopeTime']",
+    ]
+    last_err = None
+    for xp in candidates:
+        try:
+            elem = WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.XPATH, xp))
+            )
+            return Select(elem)
+        except Exception as e:
+            last_err = e
+    raise TimeoutException(f"시간 선택 select를 찾지 못함. 마지막 오류={type(last_err).__name__}")
+
+def handle_reservation_form(driver, wait):
+    """예약신청 폼: 시간=모든시간, 이름 입력, 주소록 팝업 검색/선택, 60초 대기"""
+    # 창/프레임 컨텍스트 정리
+    switch_to_latest_window(driver)
+    wait_dom_ready(driver)
+    switch_into_form_iframe_if_any(driver)
+
+    # 시간: '모든시간'
+    sel = find_time_select(driver, wait)
     try:
-        login_if_needed(driver)
-        driver.get(SITE_URL)
-
-        target_dates = get_target_weekend_dates()
-        print("[INFO] 대상 날짜(주말):", target_dates)
-
-        reserved = False
-
-        for loc in LOCATIONS:
-            if reserved: break
-            # 위치 선택
+        sel.select_by_visible_text("모든시간")
+    except Exception:
+        for v in ("ALL", "all", "A", "모든시간"):
             try:
-                click_text(driver, loc, "location_text", timeout=5)
-                print(f"[INFO] 위치 선택: {loc}")
-            except Exception as e:
-                print(f"[WARN] 위치 선택 실패: {loc}, {e}")
+                sel.select_by_value(v)
+                break
+            except Exception:
                 continue
 
-            # 코스(18홀) 선택
-            course_ok = True
-            for key in COURSE_KEYWORDS:
-                try:
-                    click_text(driver, key, "course_text", timeout=3)
-                    print(f"[INFO] 코스 선택: {key}")
-                except Exception as e:
-                    print(f"[WARN] 코스 선택 실패: {key}, {e}")
-                    course_ok = False
-                    break
-            if not course_ok:
-                continue
+    # 이름 입력
+    name_candidates = [
+        X_INPUT_NAME,
+        "//input[@name='nameKr1' or @id='nameKr1']",
+        "//input[@type='text' and (contains(@placeholder,'이름') or contains(@title,'이름'))]"
+    ]
+    name_input = None
+    for xp in name_candidates:
+        try:
+            name_input = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
+            break
+        except TimeoutException:
+            continue
+    if not name_input:
+        raise TimeoutException("이름 입력 필드를 찾지 못했습니다.")
+    name_input.clear()
+    name_input.send_keys(APPLICANT_NAME)
 
-            # 날짜 루프
-            for dt in target_dates:
-                try:
-                    ok = select_date(driver, dt)
-                    if not ok:
-                        print(f"[WARN] 날짜 선택 실패: {dt}")
-                        continue
+    # 주소록 링크 클릭 → 팝업에서 검색/선택
+    addr_candidates = [
+        X_ADDRBOOK_LINK,
+        "//a[contains(.,'검색') or contains(.,'주소록') or contains(.,'찾기')]",
+    ]
+    addr_link = None
+    for xp in addr_candidates:
+        try:
+            addr_link = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
+            break
+        except TimeoutException:
+            continue
+    if not addr_link:
+        raise TimeoutException("주소록/검색 링크를 찾지 못했습니다.")
 
-                    # 시간 선택(가장 이른 '예약/가능' 버튼)
-                    if select_first_available_time(driver):
-                        print(f"[INFO] 시간 선택 성공: {dt} @ {loc} (18홀)")
-                        # 약관/완료
-                        if finalize(driver):
-                            print("[INFO] 예약 완료 시도")
-                        else:
-                            print("[INFO] 예약 완료 단계 실패(확인 필요)")
-                        reserved = True
-                        break
-                    else:
-                        print(f"[INFO] 선택 가능 시간 없음: {dt} @ {loc}")
-                except Exception as e:
-                    print(f"[ERR] 처리 중 예외: {dt} @ {loc} -> {e}")
-                    continue
+    main_handle = driver.current_window_handle
+    old_handles = driver.window_handles[:]
+    addr_link.click()
 
-        if not reserved:
-            print("[INFO] 조건에 맞는 예약을 찾지 못했습니다. 셀렉터 점검 필요.")
+    # 팝업 전환
+    WebDriverWait(driver, 8).until(lambda d: len(d.window_handles) > len(old_handles))
+    popup_handle = next(h for h in driver.window_handles if h not in old_handles)
+    driver.switch_to.window(popup_handle)
+    wait_dom_ready(driver)
 
-        # 디버깅용 대기
-        time.sleep(3)
-
+    # 팝업 내 검색/선택
+    try:
+        search_input = wait.until(EC.presence_of_element_located((By.XPATH, X_POPUP_SEARCH_INPUT)))
+        search_input.clear()
+        search_input.send_keys(PHONE_TO_SEARCH)
+        try:
+            driver.find_element(By.XPATH, X_POPUP_SEARCH_BUTTON).click()
+        except NoSuchElementException:
+            search_input.submit()
+        first_result = wait.until(EC.element_to_be_clickable((By.XPATH, X_POPUP_FIRST_RESULT)))
+        first_result.click()
     finally:
-        # 필요 시 주석 해제
-        # driver.quit()
+        # 팝업 닫고 메인 복귀
+        try:
+            driver.close()
+        except Exception:
+            pass
+        driver.switch_to.window(main_handle)
+        switch_into_form_iframe_if_any(driver)
+
+    # 관찰/검토를 위해 잠시 대기
+    time.sleep(60)
+
+def back_to_list_and_restore(driver, wait):
+    """상세 → 목록 복귀 및 컨텍스트 복원"""
+    try:
+        driver.back()
+    except Exception:
         pass
+    wait_dom_ready(driver)
+    driver.switch_to.default_content()
+    ensure_reservation_table_context(driver, wait)
+
+# ------------------------------
+# 실행 시나리오
+# ------------------------------
+driver = webdriver.Chrome()
+wait = WebDriverWait(driver, 15)
+
+# 로그인
+driver.get(LOGIN_URL)
+wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="encId"]'))).send_keys(USER_ID)
+driver.find_element(By.XPATH, '//*[@id="userPw"]').send_keys(USER_PW)
+driver.find_element(By.XPATH, '//*[@id="loginForm"]/fieldset/div[3]/a/span').click()
+wait.until(EC.alert_is_present()).accept()
+
+# 예약 리스트로 이동 및 컨텍스트 준비
+driver.get(RES_LIST_URL)
+wait_dom_ready(driver)
+ensure_reservation_table_context(driver, wait)
+
+# 주말 컬럼 수집
+weekend_cols = collect_weekend_cols(driver)
+print("주말 컬럼 인덱스:", weekend_cols)
+
+# 각 주말 열에 대해 수원/성남 순서로 시도
+for col in weekend_cols:
+    # 수원
+    if open_slot(driver, wait, ROW_SUWON, col):
+        try:
+            handle_reservation_form(driver, wait)
+        finally:
+            back_to_list_and_restore(driver, wait)
+    else:
+        print(f"[수원] col={col} 불가(신청완료/클릭불가/미이동)")
+
+    # 성남
+    if open_slot(driver, wait, ROW_SEONGNAM, col):
+        try:
+            handle_reservation_form(driver, wait)
+        finally:
+            back_to_list_and_restore(driver, wait)
+    else:
+        print(f"[성남] col={col} 불가(신청완료/클릭불가/미이동)")
+
+# 필요 시 관찰 대기
+# time.sleep(9999)
+driver.quit()

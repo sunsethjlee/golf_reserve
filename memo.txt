@@ -1,0 +1,2 @@
+SITE_URL = "https://welfare.airforce.mil.kr:446/cli/wefResList.do?siteId=welfare&id=welfare_030101000000"  # TODO: 변경
+LOGIN_URL = "https://welfare.airforce.mil.kr:446/user/login.do?siteId=welfare&id=welfare_060100000000"  # 필요시 "https://example.com/login" 같이 입력
